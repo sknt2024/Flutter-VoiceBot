@@ -8,16 +8,16 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/services.dart';
 
-import 'services/field_extractor.dart';
+import '../services/field_extractor.dart';
 
-class WhisperDemo extends StatefulWidget {
-  const WhisperDemo({super.key});
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
   @override
-  State<WhisperDemo> createState() => _WhisperDemoState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _WhisperDemoState extends State<WhisperDemo>
+class _HomePageState extends State<HomePage>
     with SingleTickerProviderStateMixin {
   audio.Record _recorder = audio.Record();
   final FlutterTts _tts = FlutterTts();
@@ -167,8 +167,9 @@ class _WhisperDemoState extends State<WhisperDemo>
         ),
       );
 
+      /// whisper-1, gpt-4o-transcribe
       final formData = FormData.fromMap({
-        "model": "whisper-1",
+        "model": "gpt-4o-transcribe",
         "language": language,
         "file": await MultipartFile.fromFile(
           path,
@@ -274,6 +275,9 @@ class _WhisperDemoState extends State<WhisperDemo>
   /// Wrapper which will ask, transcribe, confirm with user, and retry up to attempts.
   /// Uses FieldExtractor when available to convert Hindi spoken numbers to numeric strings.
   /// Returns the accepted numeric string or null if user cancels / no value.
+  /// Wrapper which will ask, transcribe, extract and retry up to attempts.
+  /// Uses FieldExtractor when available to convert Hindi spoken numbers to numeric strings.
+  /// Returns the accepted numeric string or null if attempts exhausted / no value.
   Future<String?> _askConfirmAndFill({
     required String question,
     required String humanLabel,
@@ -285,6 +289,7 @@ class _WhisperDemoState extends State<WhisperDemo>
     int attempt = 0;
     while (attempt < maxAttempts && _isSequenceRunning) {
       attempt++;
+
       final raw = await _askRecordAndExtractRaw(
         question: question,
         language: language,
@@ -292,68 +297,26 @@ class _WhisperDemoState extends State<WhisperDemo>
       );
 
       if (raw == null || raw.isEmpty) {
-        // nothing transcribed — offer retry via dialog
-        final retry = await showDialog<bool>(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) {
-            return AlertDialog(
-              title: Text('No input for $humanLabel'),
-              content: const Text('Could not hear anything. Retry?'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text('Skip'),
-                ),
-                ElevatedButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  child: const Text('Retry'),
-                ),
-              ],
-            );
-          },
-        );
-        if (retry == true) {
-          continue; // retry
-        } else {
-          return null; // skip field
-        }
+        // nothing transcribed — automatically retry until attempts exhausted
+        debugPrint('No transcription for $humanLabel (attempt $attempt/$maxAttempts)');
+        continue; // retry
       }
 
       // If extractor available, prefer it.
       String? numeric;
       if (_extractorAvailable && _extractor != null) {
         try {
-          // Pass the raw transcription to extractor which will convert Hindi words -> numeric or return RETRY.
+          // Use first token of label as extractor fieldLabel (e.g. "Temperature")
+          final fieldToken = humanLabel.split(' ').first;
           final extracted = await _extractor!.extractField(
-            fieldLabel: humanLabel.split(' ').first, // e.g. "Temperature" from "Temperature (°C)"
+            fieldLabel: fieldToken,
             userText: raw,
           );
+
           if (extracted != null && extracted.toUpperCase() == 'RETRY') {
-            // model asked to retry -> show retry dialog to user
-            final retry = await showDialog<bool>(
-              context: context,
-              barrierDismissible: false,
-              builder: (context) {
-                return AlertDialog(
-                  title: Text('Could not extract $humanLabel'),
-                  content: Text(
-                      'Could not extract a clear numeric value from: "$raw". Retry?'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(false),
-                      child: const Text('Skip'),
-                    ),
-                    ElevatedButton(
-                      onPressed: () => Navigator.of(context).pop(true),
-                      child: const Text('Retry'),
-                    ),
-                  ],
-                );
-              },
-            );
-            if (retry == true) continue;
-            return null; // skip
+            // extractor asked to retry -> continue attempts automatically
+            debugPrint('Extractor requested RETRY for $humanLabel (raw="$raw")');
+            continue;
           }
 
           if (extracted != null && extracted.isNotEmpty) {
@@ -368,18 +331,19 @@ class _WhisperDemoState extends State<WhisperDemo>
       // fallback to simple regex extraction if extractor not available or returned null
       numeric ??= _extractNumericOnly(raw);
 
-      // confirm with user
-      final accepted = await _confirmHeard(numeric ?? raw, humanLabel);
-      if (accepted) {
-        controller.text = numeric ?? raw;
-        return numeric ?? raw;
-      } else {
-        // retry loop
-        continue;
+      // If we have a numeric value (or fallback raw), accept it immediately (no dialog)
+      if ((numeric != null && numeric.isNotEmpty) || raw.isNotEmpty) {
+        final valueToSet = (numeric != null && numeric.isNotEmpty) ? numeric : raw;
+        controller.text = valueToSet;
+        debugPrint('Auto-accepted $humanLabel => $valueToSet (attempt $attempt/$maxAttempts)');
+        return valueToSet;
       }
+
+      // otherwise retry loop
     }
 
     // attempts exhausted or sequence cancelled
+    debugPrint('Attempts exhausted for $humanLabel');
     return null;
   }
 

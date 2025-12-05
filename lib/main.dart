@@ -1,8 +1,7 @@
-// main.dart
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'whisper_demo.dart';
+import 'screens/home_page.dart';
 
 /// Search upward from the current working directory for a filename.
 /// Returns the first absolute path found or null.
@@ -82,11 +81,11 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Flutter Whisper Demo',
       theme: ThemeData.from(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const WhisperDemo(),
+      home: const HomePage(),
     );
   }
 }

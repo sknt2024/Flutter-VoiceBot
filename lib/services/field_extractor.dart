@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-/// A small wrapper to call OpenAI and extract numeric values from Hindi input.
+/// A small wrapper to call OpenAI and extract numeric values from Hindi or English (Indian accent) input.
 /// Returns either numeric string (e.g. "35.6") or the literal string "RETRY".
 class FieldExtractor {
   final Dio _dio;
@@ -16,8 +16,8 @@ class FieldExtractor {
           Dio(
             BaseOptions(
               baseUrl: 'https://api.openai.com',
-              connectTimeout: Duration(seconds: 5),
-              receiveTimeout: Duration(seconds: 5),
+              connectTimeout: const Duration(seconds: 6),
+              receiveTimeout: const Duration(seconds: 10),
             ),
           ) {
     final apiKey = _findApiKey();
@@ -41,7 +41,7 @@ class FieldExtractor {
   }
 
   /// Generic extractor for any field label (Temperature, Pressure, G1, ...)
-  /// userText: the transcription text returned by Whisper (Hindi).
+  /// userText: the transcription text returned by Whisper (Hindi or English, Indian accent).
   /// Returns: numeric string (e.g. "35.6") or "RETRY" or null on error.
   Future<String?> extractField({
     required String fieldLabel,
@@ -59,7 +59,7 @@ class FieldExtractor {
       ],
       // low temperature for deterministic numeric extraction
       "temperature": 0.0,
-      "max_tokens": 32,
+      "max_tokens": 40,
     };
 
     try {
@@ -69,22 +69,22 @@ class FieldExtractor {
 
       if (resp.statusCode == 200) {
         final data = resp.data;
-        // Chat completions: choices[0].message.content
         final content = _parseChoiceContent(data);
         if (content == null) return null;
 
         final trimmed = content.trim();
 
-        // The model is instructed to return ONLY numeric value or RETRY.
-        // But be defensive: extract numeric pattern if present.
+        // If model explicitly returned RETRY
         if (_isRetryValue(trimmed)) return 'RETRY';
+
+        // Defensively extract numeric token if model returned extra text
         final numeric = _extractNumeric(trimmed);
         if (numeric != null) return numeric;
 
-        // If model returned something else (e.g. words), return RETRY so caller can re-ask.
+        // If response includes spelled-out number words (rare because prompt asks numeric),
+        // we still request RETRY so caller can re-ask or fall back.
         return 'RETRY';
       } else {
-        // Non-200
         return null;
       }
     } on TimeoutException {
@@ -120,32 +120,47 @@ class FieldExtractor {
   // ---- helpers ----
 
   String _buildSystemPromptFor(String fieldLabel) {
-    // Keep prompt strict: convert Hindi spoken numbers -> numeric. Return ONLY number or RETRY.
+    // Prompt handles Hindi spoken numbers, English words (Indian accent) and numerals.
+    // Instruct model to return ONLY numeric value or RETRY.
     return '''
-You are a helpful assistant. Extract only the $fieldLabel value from the user's input.
-The user will speak in Hindi. Convert Hindi spoken numbers into numeric format.
-Examples:
-  "पैंतीस पॉइंट छह" -> 35.6
-  "चौंतीस" -> 34
-  "छप्पन दशमलव आठ" -> 56.8
-If a clear numeric value for $fieldLabel cannot be found, respond ONLY with the word RETRY (without quotes).
-Return ONLY the numeric value (or RETRY), nothing else.
+You are a strict extractor. Extract only the ${fieldLabel} numeric value from the user's input.
+The user may speak in Hindi OR English (Indian accent). They may say numbers as words ("35 point six", "पैंतीस पॉइंट छह")
+or provide numerals ("35.6", "35", "35°C"). Accept both. Convert spoken words to numeric format.
+
+Requirements (be strict):
+ - If you can extract a clear numeric value, return ONLY that number (digits, optionally with decimal), e.g. 35 or 35.6
+ - If you cannot confidently extract a numeric value, return ONLY the single word RETRY (uppercase)
+ - Do NOT return any extra text, punctuation, or explanation.
+
+Examples (valid outputs shown after ->):
+  Hindi spoken:
+    "पैंतीस पॉइंट छह डिग्री" -> 35.6
+    "चौंतीस" -> 34
+  English (Indian accent):
+    "thirty five point six" -> 35.6
+    "thirty five" -> 35
+  Mixed / numerals:
+    "35.6 degrees" -> 35.6
+    "35°C" -> 35
+
+Edge cases:
+ - If the user says multiple numbers, try to pick the number that best matches the context for ${fieldLabel}. If ambiguous, respond RETRY.
+ - If the user says non-numeric words only, respond RETRY.
+
+Return ONLY the numeric value or RETRY, and nothing else.
 ''';
   }
 
   String? _parseChoiceContent(dynamic data) {
     try {
-      // try common chat completion shape
       if (data is Map &&
           data['choices'] != null &&
           data['choices'].isNotEmpty) {
         final first = data['choices'][0];
         if (first != null) {
-          // new OpenAI returns {'message': {'role':..., 'content': '...'}}
           if (first['message'] != null && first['message']['content'] != null) {
             return first['message']['content'] as String;
           }
-          // some older variants: first['text']
           if (first['text'] != null) return first['text'] as String;
         }
       }
@@ -154,11 +169,12 @@ Return ONLY the numeric value (or RETRY), nothing else.
   }
 
   bool _isRetryValue(String v) {
-    return v.toUpperCase() == 'RETRY';
+    return v.toUpperCase().trim() == 'RETRY';
   }
 
   String? _extractNumeric(String s) {
-    final regex = RegExp(r'[-+]?\d+(\.\d+)?');
+    // Attempt to pick the first numeric token (handles "35.6", "35", "35°C")
+    final regex = RegExp(r'[-+]?\d+(?:\.\d+)?');
     final m = regex.firstMatch(s);
     return m?.group(0);
   }
