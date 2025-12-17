@@ -1,3 +1,8 @@
+import 'dart:convert';
+import 'dart:developer';
+import 'dart:io';
+
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:record/record.dart' as audio;
 import 'package:permission_handler/permission_handler.dart';
@@ -7,8 +12,10 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/services.dart';
+import '../screens/camera_preview_screen.dart';
 
 import '../services/field_extractor.dart';
+import '../services/image_text_extractor.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -39,6 +46,21 @@ class _HomePageState extends State<HomePage>
   final TextEditingController _g2Controller = TextEditingController();
   final TextEditingController _g3Controller = TextEditingController();
   final TextEditingController _g4Controller = TextEditingController();
+  final TextEditingController _stencilNumberController =
+      TextEditingController();
+
+  final TextEditingController _oldG1Controller = TextEditingController(
+    text: "12.5",
+  );
+  final TextEditingController _oldG2Controller = TextEditingController(
+    text: "10.0",
+  );
+  final TextEditingController _oldG3Controller = TextEditingController(
+    text: "7.5",
+  );
+  final TextEditingController _oldG4Controller = TextEditingController(
+    text: "15.0",
+  );
 
   // FocusNodes that DO NOT request focus so keyboard won't open
   final FocusNode _noFocusTemp = FocusNode(canRequestFocus: false);
@@ -52,10 +74,40 @@ class _HomePageState extends State<HomePage>
   FieldExtractor? _extractor;
   bool _extractorAvailable = false;
 
+  CameraController? _cameraController;
+  bool _cameraReady = false;
+
+  final ImageTextExtractor _imageTextExtractor = ImageTextExtractor();
+
+  Future<void> _initCamera() async {
+    try {
+      final cameras = await availableCameras();
+      final camera = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+
+      _cameraController = CameraController(
+        camera,
+        ResolutionPreset.high,
+        enableAudio: false,
+      );
+
+      await _cameraController!.initialize();
+
+      if (mounted) {
+        setState(() => _cameraReady = true);
+      }
+    } catch (e) {
+      debugPrint('Camera init failed: $e');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _configureTts();
+    _initCamera();
 
     // create extractor - if it fails (no API key) we'll disable extractor and fallback to regex
     try {
@@ -66,6 +118,121 @@ class _HomePageState extends State<HomePage>
       _extractorAvailable = false;
     }
   }
+
+  Future<String> _extractTextFromImageUsingOpenAI(File imageFile) async {
+    final apiKey = await _getApiKey();
+    if (apiKey == null || apiKey.isEmpty) {
+      throw Exception("OPENAI_API_KEY not set");
+    }
+
+    final bytes = await imageFile.readAsBytes();
+    final base64Image = base64Encode(bytes);
+
+    final dio = Dio(
+      BaseOptions(
+        baseUrl: "https://api.openai.com/v1",
+        headers: {
+          "Authorization": "Bearer $apiKey",
+          "Content-Type": "application/json",
+        },
+      ),
+    );
+
+    final response = await dio.post(
+      "/chat/completions",
+      data: {
+        "model": "gpt-4o-mini",
+        "temperature": 0,
+        "messages": [
+          {
+            "role": "system",
+            "content":
+            "You extract tyre stencil numbers.\n"
+                "Return ONLY the alphanumeric stencil number.\n"
+                "Allowed characters: A-Z and 0-9.\n"
+                "No spaces. No symbols. No explanation.\n"
+                "Example: H2407464825\n"
+                "If not found, return RETRY."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Extract the stencil number from this image."
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/jpeg;base64,$base64Image"
+                }
+              }
+            ]
+          }
+        ]
+      },
+    );
+
+    final raw =
+        response.data["choices"]?[0]?["message"]?["content"]?.toString() ?? "";
+
+    return _sanitizeStencil(raw.trim().toUpperCase());
+  }
+
+  String _sanitizeStencil(String input) {
+    final match = RegExp(r'\b[A-Z0-9]{6,}\b').firstMatch(input);
+    return match?.group(0) ?? 'RETRY';
+  }
+
+
+
+  Future<void> _openCameraAndExtract({
+    required String humanLabel,
+    required TextEditingController controller,
+  }) async {
+    final File? imageFile = await Navigator.push<File>(
+      context,
+      MaterialPageRoute(builder: (_) => const CameraPreviewScreen()),
+    );
+
+    if (imageFile == null) return;
+
+    try {
+      /// 🔥 OpenAI Vision OCR
+      final extractedText =
+      await _extractTextFromImageUsingOpenAI(imageFile);
+
+      debugPrint("OPENAI OCR RAW TEXT:\n$extractedText");
+
+      if (extractedText.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("No text detected")),
+        );
+        return;
+      }
+
+      /// 🔁 Reuse your existing FieldExtractor
+      String? numeric;
+      if (_extractorAvailable && _extractor != null) {
+        final fieldToken = humanLabel.split(' ').first;
+        numeric = await _extractor!.extractField(
+          fieldLabel: fieldToken,
+          userText: extractedText,
+        );
+      }
+
+      controller.text =
+      (numeric != null && numeric.toUpperCase() != 'RETRY')
+          ? numeric.trim()
+          : extractedText.trim();
+    } catch (e) {
+      debugPrint("OpenAI OCR error: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Failed to read text from image")),
+      );
+    }
+  }
+
 
   void _configureTts() {
     _tts.setLanguage("en-IN");
@@ -86,6 +253,34 @@ class _HomePageState extends State<HomePage>
     if (dartDefineKey.isNotEmpty) return dartDefineKey;
 
     final key = dotenv.env["OPENAI_API_KEY"];
+    if (key == null || key.isEmpty) {
+      return null;
+    }
+    return key;
+  }
+
+  String mapLang(String lang) {
+    switch (lang) {
+      case "hi":
+        return "hi-IN";
+      case "ta":
+        return "ta-IN";
+      case "te":
+        return "te-IN";
+      default:
+        return "en-IN";
+    }
+  }
+
+  Future<String?> _getAzureSpeechKey() async {
+    // prefer dart-define first, fallback to dotenv
+    const dartDefineKey = String.fromEnvironment(
+      'AZURE_SPEECH_KEY',
+      defaultValue: '',
+    );
+    if (dartDefineKey.isNotEmpty) return dartDefineKey;
+
+    final key = dotenv.env["AZURE_SPEECH_KEY"];
     if (key == null || key.isEmpty) {
       return null;
     }
@@ -123,7 +318,13 @@ class _HomePageState extends State<HomePage>
         "${tempDir.path}/rec_${DateTime.now().millisecondsSinceEpoch}.wav";
 
     try {
-      await _recorder.start(path: filePath, encoder: audio.AudioEncoder.wav);
+      await _recorder.start(
+        path: filePath,
+        encoder: audio.AudioEncoder.wav,
+        samplingRate: 16000,
+        numChannels: 1,
+        bitRate: 256000,
+      );
     } on PlatformException catch (_) {
       await _recreateRecorder();
       return false;
@@ -139,7 +340,7 @@ class _HomePageState extends State<HomePage>
     return true;
   }
 
-  Future<String?> _stopAndTranscribe({String language = "hi"}) async {
+  Future<String?> _stopAndTranscribe({String language = "hi-IN"}) async {
     // Stop recording first
     try {
       final path = await _recorder.stop();
@@ -149,52 +350,82 @@ class _HomePageState extends State<HomePage>
 
       if (path == null) return null;
 
-      final apiKey = await _getApiKey();
-      if (apiKey == null || apiKey.isEmpty) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('OPENAI_API_KEY not set')));
+      // final apiKey = await _getApiKey();
+      // if (apiKey == null || apiKey.isEmpty) {
+      //   ScaffoldMessenger.of(
+      //     context,
+      //   ).showSnackBar(const SnackBar(content: Text('OPENAI_API_KEY not set')));
+      //   return null;
+      // }
+
+      final speechKey = await _getAzureSpeechKey();
+      if (speechKey == null || speechKey.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('AZURE_SPEECH_KEY not set')),
+        );
         return null;
       }
+
+      const region = "centralindia"; // change if needed
 
       // set transcribing state
       setState(() => _isTranscribing = true);
 
+      final audioBytes = await File(path).readAsBytes();
+
       final dio = Dio(
         BaseOptions(
-          baseUrl: "https://api.openai.com",
-          headers: {"Authorization": "Bearer $apiKey"},
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 15),
+          // baseUrl: "https://api.openai.com",
+          // headers: {"Authorization": "Bearer $apiKey"},
+          headers: {
+            "Ocp-Apim-Subscription-Key": speechKey,
+            "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+            "Accept": "application/json",
+          },
         ),
       );
 
-      /// whisper-1, gpt-4o-transcribe
-      final formData = FormData.fromMap({
-        "model": "gpt-4o-transcribe",
-        "language": language,
-        "file": await MultipartFile.fromFile(
-          path,
-          filename: "audio.wav",
-          contentType: hp.MediaType("audio", "wav"),
-        ),
-      });
+      /// whisper-1, gpt-4o-transcribe, gpt-4o, gpt-4o-mini
+      // final formData = FormData.fromMap({
+      //   "model": "gpt-4o-transcribe",
+      //   "language": language,
+      //   "file": await MultipartFile.fromFile(
+      //     path,
+      //     filename: "audio.wav",
+      //     contentType: hp.MediaType("audio", "wav"),
+      //   ),
+      // });
+
+      // final response = await dio.post(
+      //   "/v1/audio/transcriptions",
+      //   data: formData,
+      // );
 
       final response = await dio.post(
-        "/v1/audio/transcriptions",
-        data: formData,
+        "https://$region.stt.speech.microsoft.com/"
+        "speech/recognition/conversation/cognitiveservices/v1"
+        "?language=en-IN",
+        data: audioBytes,
       );
 
+      log("Response: ${response}", name: "_stopAndTranscribe");
+
       if (response.statusCode == 200) {
-        final text = response.data["text"]?.toString();
+        final text = response.data["DisplayText"]?.toString();
         return text;
       } else {
-        debugPrint('Whisper error: ${response.statusCode} ${response.data}');
+        debugPrint('STT error: ${response.statusCode} ${response.data}');
         return null;
       }
+    } on DioException catch (e) {
+      debugPrint('STT Dio error: ${e.response?.data}');
+      return null;
     } catch (e, s) {
       debugPrint('Transcription error: $e\n$s');
       return null;
     } finally {
-      // always clear loading state
       if (mounted) setState(() => _isTranscribing = false);
     }
   }
@@ -227,49 +458,48 @@ class _HomePageState extends State<HomePage>
     }
 
     // stop and transcribe
-    final txt = await _stopAndTranscribe(language: language);
+    final txt = await _stopAndTranscribe(language: mapLang(language));
     if (txt == null || txt.isEmpty) return null;
     return txt;
   }
 
-  /// Speak what was heard and show Accept / Retry dialog.
-  /// Returns true if user accepted, false if retry requested.
-  Future<bool> _confirmHeard(String heard, String humanLabel) async {
-    // Speak: "I heard {heard}. Do you want to accept or retry?"
-    final speakText =
-        "I heard $heard for $humanLabel. Tap accept if correct, or retry to record again.";
+  /// Helper: returns the old value (double) for a groove label (G1..G4).
+  /// Returns null if old value is missing or cannot be parsed.
+  double? _getOldValueForLabel(String humanLabel) {
+    try {
+      if (humanLabel.startsWith('G1')) {
+        final t = _oldG1Controller.text.trim();
+        return t.isEmpty ? null : double.tryParse(t.replaceAll(',', ''));
+      } else if (humanLabel.startsWith('G2')) {
+        final t = _oldG2Controller.text.trim();
+        return t.isEmpty ? null : double.tryParse(t.replaceAll(',', ''));
+      } else if (humanLabel.startsWith('G3')) {
+        final t = _oldG3Controller.text.trim();
+        return t.isEmpty ? null : double.tryParse(t.replaceAll(',', ''));
+      } else if (humanLabel.startsWith('G4')) {
+        final t = _oldG4Controller.text.trim();
+        return t.isEmpty ? null : double.tryParse(t.replaceAll(',', ''));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Speak a short error message when current > previous for the given label.
+  Future<void> _speakErrorGreaterThanOld(
+    String humanLabel,
+    double oldVal,
+    double currentVal,
+  ) async {
+    final msg =
+        "Current ${humanLabel.split(' ').first} reading $currentVal cannot be greater than previous value $oldVal.";
     try {
       await _tts.stop();
-      await _tts.speak(speakText);
-      // don't block on awaitSpeakCompletion here — dialog is shown immediately so user can tap
-    } catch (_) {}
-
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return AlertDialog(
-          title: Text('Confirm $humanLabel'),
-          content: Text('Heard: "$heard"\n\nAccept this value or Retry?'),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop(false); // retry
-              },
-              child: const Text('Retry'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).pop(true); // accept
-              },
-              child: const Text('Accept'),
-            ),
-          ],
-        );
-      },
-    );
-
-    return result == true;
+      await _tts.speak(msg);
+      // try to wait briefly for TTS but don't block too long
+      await Future.delayed(const Duration(milliseconds: 700));
+    } catch (_) {
+      // ignore TTS errors
+    }
   }
 
   /// Wrapper which will ask, transcribe, confirm with user, and retry up to attempts.
@@ -298,7 +528,9 @@ class _HomePageState extends State<HomePage>
 
       if (raw == null || raw.isEmpty) {
         // nothing transcribed — automatically retry until attempts exhausted
-        debugPrint('No transcription for $humanLabel (attempt $attempt/$maxAttempts)');
+        debugPrint(
+          'No transcription for $humanLabel (attempt $attempt/$maxAttempts)',
+        );
         continue; // retry
       }
 
@@ -315,7 +547,9 @@ class _HomePageState extends State<HomePage>
 
           if (extracted != null && extracted.toUpperCase() == 'RETRY') {
             // extractor asked to retry -> continue attempts automatically
-            debugPrint('Extractor requested RETRY for $humanLabel (raw="$raw")');
+            debugPrint(
+              'Extractor requested RETRY for $humanLabel (raw="$raw")',
+            );
             continue;
           }
 
@@ -328,18 +562,37 @@ class _HomePageState extends State<HomePage>
         }
       }
 
-      // fallback to simple regex extraction if extractor not available or returned null
-      numeric ??= _extractNumericOnly(raw);
+      // fallback: use raw transcription when extractor not available
+      final valueToSetStr = (numeric != null && numeric.isNotEmpty)
+          ? numeric
+          : raw;
 
-      // If we have a numeric value (or fallback raw), accept it immediately (no dialog)
-      if ((numeric != null && numeric.isNotEmpty) || raw.isNotEmpty) {
-        final valueToSet = (numeric != null && numeric.isNotEmpty) ? numeric : raw;
-        controller.text = valueToSet;
-        debugPrint('Auto-accepted $humanLabel => $valueToSet (attempt $attempt/$maxAttempts)');
-        return valueToSet;
+      // If the field is one of G1..G4, validate against previous value if present
+      if (humanLabel.startsWith('G')) {
+        final oldVal = _getOldValueForLabel(humanLabel);
+        // try parse current value to double
+        final parsedCurrent = double.tryParse(
+          valueToSetStr.replaceAll(',', '').trim(),
+        );
+        if (parsedCurrent != null && oldVal != null) {
+          if (parsedCurrent > oldVal) {
+            // speak an error and retry automatically (do not accept this value)
+            debugPrint(
+              'Rejected $humanLabel because current $parsedCurrent > old $oldVal (attempt $attempt/$maxAttempts)',
+            );
+            await _speakErrorGreaterThanOld(humanLabel, oldVal, parsedCurrent);
+            // continue the loop to retry (unless attempts exhausted)
+            continue;
+          }
+        }
       }
 
-      // otherwise retry loop
+      // Accept and set the value
+      controller.text = valueToSetStr;
+      debugPrint(
+        'Auto-accepted $humanLabel => $valueToSetStr (attempt $attempt/$maxAttempts)',
+      );
+      return valueToSetStr;
     }
 
     // attempts exhausted or sequence cancelled
@@ -464,14 +717,41 @@ class _HomePageState extends State<HomePage>
     } catch (_) {}
   }
 
-  String? _extractNumericOnly(String text) {
-    // Matches numbers like 89, 60, 4.6, 32.75 etc.
-    final regex = RegExp(r'(\d+(\.\d+)?)');
-    final match = regex.firstMatch(text);
-    if (match != null) {
-      return match.group(0);
-    }
-    return null;
+  // String? _extractNumericOnly(String text) {
+  //   // Matches numbers like 89, 60, 4.6, 32.75 etc.
+  //   final regex = RegExp(r'(\d+(\.\d+)?)');
+  //   final match = regex.firstMatch(text);
+  //   if (match != null) {
+  //     return match.group(0);
+  //   }
+  //   return null;
+  // }
+
+  Widget _oldDataField({
+    required String label,
+    required TextEditingController controller,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label),
+        const SizedBox(height: 6),
+        TextField(
+          controller: controller,
+          readOnly: false,
+          showCursor: false,
+          decoration: InputDecoration(
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8.0),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderSide: const BorderSide(color: Colors.teal, width: 2),
+              borderRadius: BorderRadius.circular(8.0),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _voiceField({
@@ -515,10 +795,17 @@ class _HomePageState extends State<HomePage>
 
   @override
   void dispose() {
+    _cameraController?.dispose();
+    _imageTextExtractor.dispose();
     _recorder.dispose();
     _tts.stop();
     _tempController.dispose();
     _pressureController.dispose();
+    _stencilNumberController.dispose();
+    _oldG1Controller.dispose();
+    _oldG2Controller.dispose();
+    _oldG3Controller.dispose();
+    _oldG4Controller.dispose();
     _g1Controller.dispose();
     _g2Controller.dispose();
     _g3Controller.dispose();
@@ -561,10 +848,43 @@ class _HomePageState extends State<HomePage>
                   Row(
                     children: [
                       Expanded(
+                        child: _oldDataField(
+                          label: "G1 (mm)",
+                          controller: _oldG1Controller,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _oldDataField(
+                          label: "G2 (mm)",
+                          controller: _oldG2Controller,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+
+                      Expanded(
+                        child: _oldDataField(
+                          label: "G3 (mm)",
+                          controller: _oldG3Controller,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _oldDataField(
+                          label: "G4 (mm)",
+                          controller: _oldG4Controller,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
                         child: _voiceField(
                           label: "Temperature (°C)",
                           question:
-                          "Please say the temperature value in degrees Celsius.",
+                              "Please say the temperature value in degrees Celsius.",
                           controller: _tempController,
                           focusNode: _noFocusTemp,
                           language: "hi",
@@ -628,6 +948,41 @@ class _HomePageState extends State<HomePage>
                       ),
                     ],
                   ),
+                  const SizedBox(height: 12),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Expanded(
+                        child: _oldDataField(
+                          label: "Stencil Number",
+                          controller: _stencilNumberController,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      InkWell(
+                        onTap: () {
+                          _openCameraAndExtract(
+                            humanLabel: "Stencil Number",
+                            controller: _stencilNumberController,
+                          );
+                        },
+                        child: Container(
+                          padding: EdgeInsets.all(16.0),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context).primaryColor,
+                            borderRadius: BorderRadius.circular(8.0),
+                            border: Border.all(
+                              color: Theme.of(context).primaryColor,
+                            ),
+                          ),
+                          child: Icon(
+                            Icons.camera_alt_outlined,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -650,10 +1005,10 @@ class _HomePageState extends State<HomePage>
                     Text(
                       _isTranscribing
                           ? 'Transcribing...'
-                          : (_isSequenceRunning ? 'Inspection: $_currentStepLabel' : ''),
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.95),
-                      ),
+                          : (_isSequenceRunning
+                                ? 'Inspection: $_currentStepLabel'
+                                : ''),
+                      style: TextStyle(color: Colors.white.withOpacity(0.95)),
                     ),
                     const SizedBox(height: 8),
                     if (_isSequenceRunning && !_isRecording)
