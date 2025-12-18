@@ -81,7 +81,8 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Whisper Demo',
+      title: 'Voice Assisted Inspection',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData.from(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),

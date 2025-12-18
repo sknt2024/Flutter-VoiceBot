@@ -3,6 +3,9 @@ import 'dart:developer';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_whisper_demo/widgets/defects_dropdown.dart';
+import 'package:flutter_whisper_demo/widgets/old_groove_readings.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:record/record.dart' as audio;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:dio/dio.dart';
@@ -11,9 +14,9 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/services.dart';
-import '../screens/camera_preview_screen.dart';
 
 import '../services/field_extractor.dart';
+import '../widgets/defects_sections.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -145,6 +148,8 @@ class _HomePageState extends State<HomePage>
     return _sanitizeStencil(raw.trim().toUpperCase());
   }
 
+  final ImagePicker _picker = ImagePicker();
+
   String _sanitizeStencil(String input) {
     final match = RegExp(r'\b[A-Z0-9]{6,}\b').firstMatch(input);
     return match?.group(0) ?? 'RETRY';
@@ -154,12 +159,17 @@ class _HomePageState extends State<HomePage>
     required String humanLabel,
     required TextEditingController controller,
   }) async {
-    final File? imageFile = await Navigator.push<File>(
-      context,
-      MaterialPageRoute(builder: (_) => const CameraPreviewScreen()),
+    // final File? imageFile = await Navigator.push<File>(
+    //   context,
+    //   MaterialPageRoute(builder: (_) => const CameraPreviewScreen()),
+    // );
+
+    final XFile? image = await _picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 100,
     );
 
-    if (imageFile == null) return;
+    File? imageFile = File(image!.path);
 
     try {
       /// 🔥 OpenAI Vision OCR
@@ -196,7 +206,7 @@ class _HomePageState extends State<HomePage>
   }
 
   void _configureTts() {
-    _tts.setLanguage("en-IN");
+    _tts.setLanguage("hi-IN");
     _tts.setSpeechRate(0.4);
     _tts.setVolume(1.0);
     _tts.setPitch(1.0);
@@ -778,25 +788,18 @@ class _HomePageState extends State<HomePage>
     super.dispose();
   }
 
-  bool _defectsPresent = false;
-
-  void toggleDefects(bool value) {
-    setState(() {
-      _defectsPresent = value;
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
-    // build UI with a stack to overlay transcribing loader
     return Scaffold(
-      appBar: AppBar(title: const Text("Voice-Assisted Inspection")),
+      appBar: AppBar(
+        title: const Text("Voice-Assisted Inspection"),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+      ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
           if (_isSequenceRunning) {
             _stopInspectionSequence();
           } else {
-            // start only if not transcribing
             _startInspectionSequence();
           }
         },
@@ -812,37 +815,11 @@ class _HomePageState extends State<HomePage>
             child: SingleChildScrollView(
               child: Column(
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _oldDataField(
-                          label: "G1 (mm)",
-                          controller: _oldG1Controller,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: _oldDataField(
-                          label: "G2 (mm)",
-                          controller: _oldG2Controller,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-
-                      Expanded(
-                        child: _oldDataField(
-                          label: "G3 (mm)",
-                          controller: _oldG3Controller,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: _oldDataField(
-                          label: "G4 (mm)",
-                          controller: _oldG4Controller,
-                        ),
-                      ),
-                    ],
+                  OldGrooveReadings(
+                    g1: _oldG1Controller.text,
+                    g2: _oldG2Controller.text,
+                    g3: _oldG3Controller.text,
+                    g4: _oldG4Controller.text,
                   ),
                   const SizedBox(height: 12),
                   Row(
@@ -925,7 +902,7 @@ class _HomePageState extends State<HomePage>
                           controller: _stencilNumberController,
                         ),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
                       InkWell(
                         onTap: () {
                           _openCameraAndExtract(
@@ -951,17 +928,7 @@ class _HomePageState extends State<HomePage>
                     ],
                   ),
                   const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text("Is there any defects?"),
-                      Switch.adaptive(
-                        value: _defectsPresent,
-                        onChanged: (value) => toggleDefects(value),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
+                  DefectsSections(),
                 ],
               ),
             ),
