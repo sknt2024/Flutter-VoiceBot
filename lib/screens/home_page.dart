@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:record/record.dart' as audio;
 import 'package:permission_handler/permission_handler.dart';
@@ -15,7 +14,6 @@ import 'package:flutter/services.dart';
 import '../screens/camera_preview_screen.dart';
 
 import '../services/field_extractor.dart';
-import '../services/image_text_extractor.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -74,40 +72,10 @@ class _HomePageState extends State<HomePage>
   FieldExtractor? _extractor;
   bool _extractorAvailable = false;
 
-  CameraController? _cameraController;
-  bool _cameraReady = false;
-
-  final ImageTextExtractor _imageTextExtractor = ImageTextExtractor();
-
-  Future<void> _initCamera() async {
-    try {
-      final cameras = await availableCameras();
-      final camera = cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.back,
-        orElse: () => cameras.first,
-      );
-
-      _cameraController = CameraController(
-        camera,
-        ResolutionPreset.high,
-        enableAudio: false,
-      );
-
-      await _cameraController!.initialize();
-
-      if (mounted) {
-        setState(() => _cameraReady = true);
-      }
-    } catch (e) {
-      debugPrint('Camera init failed: $e');
-    }
-  }
-
   @override
   void initState() {
     super.initState();
     _configureTts();
-    _initCamera();
 
     // create extractor - if it fails (no API key) we'll disable extractor and fallback to regex
     try {
@@ -147,29 +115,27 @@ class _HomePageState extends State<HomePage>
           {
             "role": "system",
             "content":
-            "You extract tyre stencil numbers.\n"
+                "You extract tyre stencil numbers.\n"
                 "Return ONLY the alphanumeric stencil number.\n"
                 "Allowed characters: A-Z and 0-9.\n"
                 "No spaces. No symbols. No explanation.\n"
                 "Example: H2407464825\n"
-                "If not found, return RETRY."
+                "If not found, return RETRY.",
           },
           {
             "role": "user",
             "content": [
               {
                 "type": "text",
-                "text": "Extract the stencil number from this image."
+                "text": "Extract the stencil number from this image.",
               },
               {
                 "type": "image_url",
-                "image_url": {
-                  "url": "data:image/jpeg;base64,$base64Image"
-                }
-              }
-            ]
-          }
-        ]
+                "image_url": {"url": "data:image/jpeg;base64,$base64Image"},
+              },
+            ],
+          },
+        ],
       },
     );
 
@@ -184,8 +150,6 @@ class _HomePageState extends State<HomePage>
     return match?.group(0) ?? 'RETRY';
   }
 
-
-
   Future<void> _openCameraAndExtract({
     required String humanLabel,
     required TextEditingController controller,
@@ -199,15 +163,14 @@ class _HomePageState extends State<HomePage>
 
     try {
       /// 🔥 OpenAI Vision OCR
-      final extractedText =
-      await _extractTextFromImageUsingOpenAI(imageFile);
+      final extractedText = await _extractTextFromImageUsingOpenAI(imageFile);
 
       debugPrint("OPENAI OCR RAW TEXT:\n$extractedText");
 
       if (extractedText.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("No text detected")),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("No text detected")));
         return;
       }
 
@@ -221,8 +184,7 @@ class _HomePageState extends State<HomePage>
         );
       }
 
-      controller.text =
-      (numeric != null && numeric.toUpperCase() != 'RETRY')
+      controller.text = (numeric != null && numeric.toUpperCase() != 'RETRY')
           ? numeric.trim()
           : extractedText.trim();
     } catch (e) {
@@ -232,7 +194,6 @@ class _HomePageState extends State<HomePage>
       );
     }
   }
-
 
   void _configureTts() {
     _tts.setLanguage("en-IN");
@@ -745,7 +706,7 @@ class _HomePageState extends State<HomePage>
               borderRadius: BorderRadius.circular(8.0),
             ),
             focusedBorder: OutlineInputBorder(
-              borderSide: const BorderSide(color: Colors.teal, width: 2),
+              borderSide: const BorderSide(width: 2),
               borderRadius: BorderRadius.circular(8.0),
             ),
           ),
@@ -776,7 +737,7 @@ class _HomePageState extends State<HomePage>
               borderRadius: BorderRadius.circular(8.0),
             ),
             focusedBorder: OutlineInputBorder(
-              borderSide: const BorderSide(color: Colors.teal, width: 2),
+              borderSide: const BorderSide(width: 2),
               borderRadius: BorderRadius.circular(8.0),
             ),
           ),
@@ -795,8 +756,6 @@ class _HomePageState extends State<HomePage>
 
   @override
   void dispose() {
-    _cameraController?.dispose();
-    _imageTextExtractor.dispose();
     _recorder.dispose();
     _tts.stop();
     _tempController.dispose();
@@ -819,11 +778,19 @@ class _HomePageState extends State<HomePage>
     super.dispose();
   }
 
+  bool _defectsPresent = false;
+
+  void toggleDefects(bool value) {
+    setState(() {
+      _defectsPresent = value;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     // build UI with a stack to overlay transcribing loader
     return Scaffold(
-      appBar: AppBar(title: const Text("Whisper Voice Inputs")),
+      appBar: AppBar(title: const Text("Voice-Assisted Inspection")),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
           if (_isSequenceRunning) {
@@ -983,6 +950,18 @@ class _HomePageState extends State<HomePage>
                       ),
                     ],
                   ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text("Is there any defects?"),
+                      Switch.adaptive(
+                        value: _defectsPresent,
+                        onChanged: (value) => toggleDefects(value),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
                 ],
               ),
             ),
